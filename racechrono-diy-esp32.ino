@@ -22,6 +22,15 @@
 #include <EasyLogger.h>
 #include <RaceChrono.h>
 
+// arduino-esp32 3.3.x releases the BLE controller memory during boot unless a
+// BLE library claims it first. NimBLE-Arduino 1.4.x predates that hook, so on a
+// classic ESP32 esp_bt_controller_init() fails with ESP_ERR_INVALID_STATE and
+// the board reboots in a loop. Including this header claims the BLE memory
+// (it does not exist on older cores, hence the guard).
+#if __has_include(<esp32-hal-alloc-ble-mem.h>)
+#include <esp32-hal-alloc-ble-mem.h>
+#endif
+
 // bool isTwaiDriverStarted = false;
 bool isBLEStarted = false;
 twai_message_t message;
