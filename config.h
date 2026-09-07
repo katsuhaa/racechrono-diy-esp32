@@ -25,11 +25,13 @@
 
 // GPIO pins connected to the CAN transceiver (SN65HVD230)
 // RX_PIN : wired to the transceiver R (RXD / CRX) output
-// TX_PIN : INTENTIONALLY NOT WIRED. The TWAI driver needs a valid GPIO number,
-//          but nothing is connected to GPIO 5 and the transceiver D (TXD / CTX)
-//          input is left open (open = recessive), so the bus can never be driven.
+// TX_PIN : wired to the transceiver D (TXD / CTX). On these VP230 modules an open
+//          D input floats dominant and R stops toggling, so D must be tied high.
+//          In TWAI_MODE_LISTEN_ONLY the controller never drives TX low, so the
+//          bus is still never driven.
 // RX_PIN : トランシーバの R (RXD / CRX) へ配線
-// TX_PIN : 意図的に未配線（ドライバ起動用のダミー指定）。トランシーバの D (TXD / CTX) は開放＝レセッシブ固定。
+// TX_PIN : トランシーバの D (TXD / CTX) へ配線。このモジュールは D 開放だと R が出なくなるため H に固定する。
+//          LISTEN_ONLY では TX が L になることは無いのでバスは駆動されない。
 #define RX_PIN 4
 #define TX_PIN 5
 
@@ -54,24 +56,28 @@
 
 // An optional list of PIDs and their associated rate limit.
 // Limits the update rate of the specified PID to the returned value.
-// Fiat 500 (312) family broadcast frames use 29-bit IDs. The candidates below
-// come from public Fiat 500 / 500L logs (build manual, chapter 3) and are NOT
-// yet confirmed on the Abarth 595: uncomment a case once the ID is verified.
-// Fiat 500（312）系の放送フレームは 29 ビット ID。候補は手順書 3 章の公開情報で、
-// Abarth 595 では未確認。実車で確認できたらコメントを外す。
+// All IDs are 29-bit and were confirmed on the Abarth 595 Series 4 with the
+// tools/can_monitor sketch (2026-09-07 in-car logs, build manual chapter 3).
+// すべて 29 ビット ID。tools/can_monitor で実車確認済み（2026-09-07、手順書 3 章）。
 uint8_t getUpdateRateHz(uint32_t can_id)
 {
     switch (can_id)
     {
 
-    // case 0x0218A006: // Wheel speeds, 4 x 16-bit / 4 輪速
-    //     return 20;
-    // case 0x0210A006: // Vehicle speed, bytes 4-5 big-endian / 128 = km/h / 車速
-    //     return 10;
-    // case 0x0618A001: // Engine RPM, bytes 2-3 big-endian / 回転数
-    //     return 10;
-    // case 0x0810A000: // Brake, byte 2 upper nibble / ブレーキ
-    //     return 20;
+    case 0x0618A001: // RPM b2-3 BE, accelerator pedal b7 (0-255 = 0-100 %) / 回転数・アクセル
+        return 20;
+    case 0x0030A002: // Steering angle 20-bit (b3b4b5 >> 4), 0.1 deg, left + / 舵角
+        return 20;
+    case 0x0210A006: // Vehicle speed b4-5 BE / 128 = km/h / 車速
+        return 10;
+    case 0x0218A006: // Wheel speeds 4 x 16-bit BE / 16 = km/h / 4 輪速
+        return 10;
+    case 0x0810A000: // Brake switch b2 upper nibble (1 off, 7 on) / ブレーキ SW
+        return 10;
+    case 0x0010A006: // Brake pressure b1-2 BE (0 ... ~0x11B) / ブレーキ圧
+        return 10;
+    case 0x0628A001: // Clutch b5 bit5 (0x20) / クラッチ
+        return 5;
 
     default:
         return DEFAULT_UPDATE_RATE_HZ;
