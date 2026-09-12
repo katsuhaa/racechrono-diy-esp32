@@ -84,4 +84,55 @@ uint8_t getUpdateRateHz(uint32_t can_id)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shift indicator - WS2812B 24-LED bar / シフトインジケータ
+// ---------------------------------------------------------------------------
+
+// Data pin to the strip DIN. Freenove silkscreen "25".
+// テープの DIN へ。Freenove のシルク「25」。
+#define SHIFT_LED_PIN 25
+#define SHIFT_NUM_LEDS 24
+#define SHIFT_BAR_LEDS (SHIFT_NUM_LEDS - 1) // LED#2..#24
+
+// 0..255. Applies to every colour. Dashboard brightness to be tuned in the car.
+// 全色に掛かる。車載時の明るさは実車で調整する。
+#define SHIFT_MASTER_BRIGHTNESS 64
+#define SHIFT_GRAY_LEVEL_PCT 25  // dim gray = this percent of master / グレーはマスターのこの割合
+#define SHIFT_COLOR_ORDER_RGB 0  // 0 = GRB (WS2812B) / 0 で GRB
+
+// Bar scale, settled 2026-09-12.
+// LED#2 1000, LED#3 1700, LED#4 2400, then +200 rpm each -> LED#24 = 2400 + 20*200 = 6400.
+// Every colour boundary lands exactly on an LED: 3000=#7, 4000=#12, 5800=#21, 6200=#23.
+// バーの割り当て（2026-09-12 確定）。色の境界がすべて LED にぴったり乗る。
+#define SHIFT_RPM_BAR_1 1000
+#define SHIFT_RPM_BAR_2 1700
+#define SHIFT_RPM_BAR_3 2400
+#define SHIFT_RPM_STEP 200
+
+// Colour of each LED, fixed by the rpm that LED stands for.
+// 各 LED の色は、その LED が担当する回転数で固定。
+#define SHIFT_RPM_GRAY_MAX 3000 // below: dim gray  (LED#2..#6)  / 未満はグレー
+#define SHIFT_RPM_BLUE_MAX 4000 // below: blue      (LED#7..#11) / 未満は青
+#define SHIFT_RPM_YELLOW 5800   // below: green (LED#12..#20); at/above: yellow AND flashing starts
+                                // 未満は緑。以上は黄、かつ点滅開始
+#define SHIFT_RPM_RED 6200      // at/above: every lit LED turns red / 以上は点灯中の全 LED が赤
+
+#define SHIFT_FLASH_PERIOD_MS 100 // 10 Hz flash / 点滅 10 Hz
+#define SHIFT_FRAME_MS 20         // LED refresh period / LED 更新周期
+
+// RPM source. Same frame as the RaceChrono RPM channel: ID 0x0618A001, bytes 2-3
+// big endian. The divisor below is NOT yet confirmed against the car - at idle
+// (about 850 rpm) the bar must stay dark; if it lights several LEDs the divisor
+// is wrong. LOG_LEVEL_DEBUG prints the raw value and the derived rpm every 10 s.
+// 回転数の取得元。ID 0x0618A001 の b2-b3（ビッグエンディアン）。
+// 下の除数は実車未確認。アイドリング（約 850rpm）でバーが消灯していれば正しい。
+// 何個か点灯するなら除数が違う。DEBUG では 10 秒ごとに生値と換算値を出す。
+#define SHIFT_RPM_CAN_ID 0x0618A001
+#define SHIFT_RPM_DIVISOR 4
+
+// Blank the bar if no RPM frame arrives for this long (engine off / bus quiet).
+// この時間 RPM フレームが来なければバーを消す（エンジン停止・バス停止）。
+#define SHIFT_RPM_TIMEOUT_US 1000000
+
 #endif // CONFIG_H
+

@@ -43,6 +43,214 @@ using PidExtra = struct
 };
 RaceChronoPidMap<PidExtra> pidMap;
 
+// ---------------------------------------------------------------------------
+// Shift indicator - WS2812B bar driven by the esp32 core RMT HAL.
+// No external LED library. Bit timing and API taken from arduino-esp32 3.3.x
+// cores/esp32/esp32-hal-rgb-led.c : 100 ns tick, "1" = 0.8us high + 0.4us low,
+// "0" = 0.4us high + 0.8us low. Verified on this board with led_selftest.
+// シフトインジケータ。外部ライブラリ不要、esp32 core の RMT HAL で駆動。
+// ビットタイミングと API は core 3.3.x の esp32-hal-rgb-led.c に準拠。
+// ---------------------------------------------------------------------------
+
+struct ShiftRgb
+{
+    uint8_t r, g, b;
+};
+
+static const ShiftRgb SHIFT_C_ORANGE = {255, 70, 0};
+static const ShiftRgb SHIFT_C_GRAY = {255, 255, 255}; // scaled by SHIFT_GRAY_LEVEL_PCT
+static const ShiftRgb SHIFT_C_BLUE = {0, 0, 255};
+static const ShiftRgb SHIFT_C_GREEN = {0, 255, 0};
+static const ShiftRgb SHIFT_C_YELLOW = {255, 220, 0};
+static const ShiftRgb SHIFT_C_RED = {255, 0, 0};
+
+static rmt_data_t shiftRmtBuf[SHIFT_NUM_LEDS * 24];
+static uint8_t shiftPx[SHIFT_NUM_LEDS][3];
+static int shiftBarRpm[SHIFT_BAR_LEDS]; // rpm at which bar LED k (LED#(k+2)) lights
+static bool isShiftLedStarted = false;
+
+// Written by taskGetTwaiMessages, read by taskUpdateShiftLed.
+// taskGetTwaiMessages が書き、taskUpdateShiftLed が読む。
+static volatile uint32_t shiftRpm = 0;
+static volatile uint32_t shiftRpmRaw = 0;
+static volatile uint64_t shiftRpmLastTime = 0;
+
+static inline uint8_t shiftScale8(uint8_t v, uint16_t scale255)
+{
+    return (uint8_t)(((uint16_t)v * scale255) / 255);
+}
+
+static ShiftRgb shiftPct(ShiftRgb c, int percent)
+{
+    ShiftRgb o;
+    o.r = (uint8_t)(((uint16_t)c.r * percent) / 100);
+    o.g = (uint8_t)(((uint16_t)c.g * percent) / 100);
+    o.b = (uint8_t)(((uint16_t)c.b * percent) / 100);
+    return o;
+}
+
+static void shiftSetPixel(int i, ShiftRgb c)
+{
+    if (i < 0 || i >= SHIFT_NUM_LEDS)
+    {
+        return;
+    }
+
+    uint8_t r = shiftScale8(c.r, SHIFT_MASTER_BRIGHTNESS);
+    uint8_t g = shiftScale8(c.g, SHIFT_MASTER_BRIGHTNESS);
+    uint8_t b = shiftScale8(c.b, SHIFT_MASTER_BRIGHTNESS);
+
+#if SHIFT_COLOR_ORDER_RGB
+    shiftPx[i][0] = r;
+    shiftPx[i][1] = g;
+    shiftPx[i][2] = b;
+#else
+    shiftPx[i][0] = g;
+    shiftPx[i][1] = r;
+    shiftPx[i][2] = b;
+#endif
+}
+
+static void shiftShow()
+{
+    int k = 0;
+    for (int i = 0; i < SHIFT_NUM_LEDS; i++)
+    {
+        for (int c = 0; c < 3; c++)
+        {
+            uint8_t v = shiftPx[i][c];
+            for (int bit = 7; bit >= 0; bit--)
+            {
+                if (v & (1 << bit))
+                {
+                    shiftRmtBuf[k].level0 = 1;
+                    shiftRmtBuf[k].duration0 = 8; // 0.8 us
+                    shiftRmtBuf[k].level1 = 0;
+                    shiftRmtBuf[k].duration1 = 4; // 0.4 us
+                }
+                else
+                {
+                    shiftRmtBuf[k].level0 = 1;
+                    shiftRmtBuf[k].duration0 = 4;
+                    shiftRmtBuf[k].level1 = 0;
+                    shiftRmtBuf[k].duration1 = 8;
+                }
+                k++;
+            }
+        }
+    }
+
+    rmtWrite(SHIFT_LED_PIN, shiftRmtBuf, SHIFT_NUM_LEDS * 24, 100);
+    delayMicroseconds(300); // strip latch / リセット期間
+}
+
+// Colour of one LED, fixed by the rpm that LED stands for.
+// 各 LED の色は、その LED が担当する回転数で固定。
+static ShiftRgb shiftColorAtPos(int rpmPos)
+{
+    if (rpmPos >= SHIFT_RPM_RED)
+    {
+        return SHIFT_C_RED;
+    }
+    if (rpmPos >= SHIFT_RPM_YELLOW)
+    {
+        return SHIFT_C_YELLOW;
+    }
+    if (rpmPos >= SHIFT_RPM_BLUE_MAX)
+    {
+        return SHIFT_C_GREEN;
+    }
+    if (rpmPos >= SHIFT_RPM_GRAY_MAX)
+    {
+        return SHIFT_C_BLUE;
+    }
+    return shiftPct(SHIFT_C_GRAY, SHIFT_GRAY_LEVEL_PCT);
+}
+
+static int shiftLitCount(uint32_t rpm)
+{
+    int n = 0;
+    for (int k = 0; k < SHIFT_BAR_LEDS; k++)
+    {
+        if (rpm >= (uint32_t)shiftBarRpm[k])
+        {
+            n++;
+        }
+    }
+    return n;
+}
+
+// LED#1 is always orange. LED#2..#24 form the bar; each keeps its own colour,
+// except at/above SHIFT_RPM_RED where every lit LED turns red. From
+// SHIFT_RPM_YELLOW up everything flashes, but the BAR LENGTH IS KEPT so the
+// last few hundred rpm still resolve LED by LED. LED#24 shows orange until the
+// bar reaches it.
+// LED#1 は常時オレンジ。LED#2〜#24 がバーで各 LED は自分の色を保つ。
+// SHIFT_RPM_RED 以上では点灯中の全 LED が赤。SHIFT_RPM_YELLOW 以上は全体が点滅
+// するが、バーの長さは維持するので最後の数百回転も LED 単位で読める。
+// LED#24 はバーが到達するまでオレンジ。
+static void shiftRender(uint32_t rpm)
+{
+    memset(shiftPx, 0, sizeof(shiftPx));
+
+    bool flashing = rpm >= SHIFT_RPM_YELLOW;
+    if (flashing && ((millis() / (SHIFT_FLASH_PERIOD_MS / 2)) & 1))
+    {
+        return; // off phase, oranges included / 消灯フェーズ。オレンジも消える
+    }
+
+    shiftSetPixel(0, SHIFT_C_ORANGE);
+
+    int n = shiftLitCount(rpm);
+    bool allRed = rpm >= SHIFT_RPM_RED;
+    for (int k = 0; k < n; k++)
+    {
+        shiftSetPixel(k + 1, allRed ? SHIFT_C_RED : shiftColorAtPos(shiftBarRpm[k]));
+    }
+
+    if (n < SHIFT_BAR_LEDS)
+    {
+        shiftSetPixel(SHIFT_NUM_LEDS - 1, SHIFT_C_ORANGE);
+    }
+}
+
+void taskUpdateShiftLed(void *)
+{
+    LOG_DEBUG("task_shift_led", "Starting up on core " << xPortGetCoreID() << ".");
+
+    uint64_t reportTimerStart = esp_timer_get_time();
+    int reportTimerInterval = 10000000; // 10 seconds
+
+    for (;;)
+    {
+        uint32_t rpm = shiftRpm;
+
+        // No RPM frame for a while: blank the bar but keep the orange markers.
+        // しばらく RPM フレームが来なければバーを消す（オレンジは残す）。
+        if ((esp_timer_get_time() - shiftRpmLastTime) > SHIFT_RPM_TIMEOUT_US)
+        {
+            rpm = 0;
+        }
+
+        shiftRender(rpm);
+        shiftShow();
+
+        // Debug - the only on-device way to check the raw-to-rpm conversion.
+        // 生値から回転数への換算を実機で確認する唯一の手段。
+        if (LOG_LEVEL == LOG_LEVEL_DEBUG)
+        {
+            if ((esp_timer_get_time() - reportTimerStart) >= reportTimerInterval)
+            {
+                LOG_DEBUG("task_shift_led", "raw " << shiftRpmRaw << " -> " << rpm << " rpm, "
+                                                   << shiftLitCount(rpm) << "/" << SHIFT_BAR_LEDS << " LEDs lit.");
+                reportTimerStart = esp_timer_get_time();
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(SHIFT_FRAME_MS));
+    }
+}
+
 // Code taken from the arduino-RaceChrono example files.
 class PrintRaceChronoCommands : public RaceChronoBleCanHandler
 {
@@ -224,6 +432,19 @@ void taskGetTwaiMessages(void *)
         if (twai_receive(&message, portMAX_DELAY) == ESP_OK)
         {
             msgCountRx++;
+
+            // Shift indicator: read the RPM straight off the bus, independently
+            // of pidMap - pidMap is emptied whenever RaceChrono disconnects, so
+            // relying on it would kill the bar with no phone connected.
+            // シフトインジケータ用の回転数はバスから直接取得する。pidMap は
+            // RaceChrono 切断時に空になるため、依存させると BLE 未接続でバーが死ぬ。
+            if (!(message.rtr) && message.identifier == SHIFT_RPM_CAN_ID && message.data_length_code >= 4)
+            {
+                shiftRpmRaw = ((uint32_t)message.data[2] << 8) | (uint32_t)message.data[3];
+                shiftRpm = shiftRpmRaw / SHIFT_RPM_DIVISOR;
+                shiftRpmLastTime = esp_timer_get_time();
+            }
+
             if (!(message.rtr))
             {
                 if (!(message.data_length_code == 0))
@@ -328,6 +549,32 @@ void setup()
 
     delay(1250); // Delay used to avoid multiple serial messages overlapping
     xTaskCreatePinnedToCore(taskSendBLEMessages, "taskSendBLEMessages", 4096, NULL, 5, NULL, 0);
+
+    // Shift indicator. Pinned to the TWAI core: that task blocks on
+    // twai_receive() so it yields, and core 0 is left to the BLE stack.
+    // Priority 1, below the TWAI and BLE tasks - the bar must never delay them.
+    // シフトインジケータ。TWAI と同じコアに固定（TWAI タスクは twai_receive で
+    // ブロックするため譲る）。コア 0 は BLE スタックに残す。
+    // 優先度は 1 で TWAI・BLE より低い。バーが他を遅らせないこと。
+    shiftBarRpm[0] = SHIFT_RPM_BAR_1;
+    shiftBarRpm[1] = SHIFT_RPM_BAR_2;
+    for (int k = 2; k < SHIFT_BAR_LEDS; k++)
+    {
+        shiftBarRpm[k] = SHIFT_RPM_BAR_3 + (k - 2) * SHIFT_RPM_STEP;
+    }
+
+    delay(1250); // Delay used to avoid multiple serial messages overlapping
+    if (rmtInit(SHIFT_LED_PIN, RMT_TX_MODE, RMT_MEM_NUM_BLOCKS_1, 10000000)) // 100 ns tick
+    {
+        isShiftLedStarted = true;
+        LOG_NOTICE("shift_led", "RMT started on GPIO " << SHIFT_LED_PIN << ", bar tops out at "
+                                                       << shiftBarRpm[SHIFT_BAR_LEDS - 1] << " rpm.");
+        xTaskCreatePinnedToCore(taskUpdateShiftLed, "taskUpdateShiftLed", 4096, NULL, 1, NULL, mainCore);
+    }
+    else
+    {
+        LOG_ERROR("shift_led", "rmtInit failed on GPIO " << SHIFT_LED_PIN << ", shift indicator disabled.");
+    }
 }
 
 // The default Arduino loop is not used, so no point in keeping the task running
