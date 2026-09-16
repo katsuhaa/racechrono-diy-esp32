@@ -73,7 +73,12 @@ static bool isShiftLedStarted = false;
 // taskGetTwaiMessages が書き、taskUpdateShiftLed が読む。
 static volatile uint32_t shiftRpm = 0;
 static volatile uint32_t shiftRpmRaw = 0;
-static volatile uint64_t shiftRpmLastTime = 0;
+// 32-bit on purpose: a 64-bit value is not written atomically on this CPU, so
+// the reader could catch a half-updated timestamp. Unsigned wrap keeps the
+// difference correct across the 71-minute rollover of the low 32 bits.
+// 32 ビットで持つ。64 ビットはこの CPU では不可分に書けず、読み側が更新途中の値を
+// 拾い得る。下位 32 ビットが約 71 分で一周しても、符号なしの引き算なら差は正しい。
+static volatile uint32_t shiftRpmLastTime = 0;
 
 static inline uint8_t shiftScale8(uint8_t v, uint16_t scale255)
 {
@@ -227,7 +232,7 @@ void taskUpdateShiftLed(void *)
 
         // No RPM frame for a while: blank the bar but keep the orange markers.
         // しばらく RPM フレームが来なければバーを消す（オレンジは残す）。
-        if ((esp_timer_get_time() - shiftRpmLastTime) > SHIFT_RPM_TIMEOUT_US)
+        if (((uint32_t)esp_timer_get_time() - shiftRpmLastTime) > SHIFT_RPM_TIMEOUT_US)
         {
             rpm = 0;
         }
@@ -442,7 +447,7 @@ void taskGetTwaiMessages(void *)
             {
                 shiftRpmRaw = ((uint32_t)message.data[2] << 8) | (uint32_t)message.data[3];
                 shiftRpm = shiftRpmRaw / SHIFT_RPM_DIVISOR;
-                shiftRpmLastTime = esp_timer_get_time();
+                shiftRpmLastTime = (uint32_t)esp_timer_get_time();
             }
 
             if (!(message.rtr))
