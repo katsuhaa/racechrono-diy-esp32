@@ -101,6 +101,15 @@ static void shiftSetPixel(int i, ShiftRgb c)
         return;
     }
 
+    // Logical position to physical LED. Everything above this line counts
+    // LED#1 as the low-rpm end; only this mapping knows which physical end
+    // that is.
+    // 論理位置から実際の LED 番号へ。ここより上は LED#1 を低回転側として
+    // 数えており、それが実際のどちら端かを知っているのはこの変換だけ。
+#if SHIFT_REVERSE
+    i = SHIFT_NUM_LEDS - 1 - i;
+#endif
+
     uint8_t r = shiftScale8(c.r, SHIFT_MASTER_BRIGHTNESS);
     uint8_t g = shiftScale8(c.g, SHIFT_MASTER_BRIGHTNESS);
     uint8_t b = shiftScale8(c.b, SHIFT_MASTER_BRIGHTNESS);

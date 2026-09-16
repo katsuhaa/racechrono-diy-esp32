@@ -92,6 +92,16 @@ uint8_t getUpdateRateHz(uint32_t can_id)
 // テープの DIN へ。Freenove のシルク「25」。
 #define SHIFT_LED_PIN 25
 #define SHIFT_NUM_LEDS 24
+
+// Physical direction of the strip in the case.
+// 0 = LED#1 sits at the DIN end, the bar grows away from DIN.
+// 1 = LED#1 sits at the far end, the bar grows towards DIN.
+// Decided by which way round the strip ends up. Flip this one value only.
+// 筐体に入れたときのテープの向き。
+// 0 = DIN 側が LED#1。バーは DIN から遠ざかる向きに伸びる。
+// 1 = DIN と反対側が LED#1。バーは DIN に向かって伸びる。
+// 実物の向きで決める。変えるのはこの 1 個だけでよい。
+#define SHIFT_REVERSE 1
 #define SHIFT_BAR_LEDS (SHIFT_NUM_LEDS - 1) // LED#2..#24
 
 // 0..255. Applies to every colour. Dashboard brightness to be tuned in the car.
