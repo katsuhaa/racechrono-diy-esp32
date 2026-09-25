@@ -467,7 +467,7 @@ void taskGetTwaiMessages(void *)
                     if (entry != NULL)
                     {
                         PidExtra *extra = pidMap.getExtra(entry);
-                        if ((esp_timer_get_time() - extra->lastMessageTime) >= extra->updateIntervalHz)
+                        if ((uint32_t)((uint32_t)esp_timer_get_time() - extra->lastMessageTime) >= extra->updateIntervalHz)
                         {
                             msgCountBufferTx++;
                             if (!(xRingbufferSend(bufferHandle, &message, sizeof(message), 0)))
