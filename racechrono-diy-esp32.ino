@@ -812,10 +812,9 @@ static const char *canDumpStateName(twai_state_t s)
     }
 }
 
-// Decoded value of one known ID, using the byte positions written in config.h.
-// The RPM divisor is still unconfirmed, the steering value is left raw.
-// config.h に書いたバイト位置で既知 ID をデコードする。
-// 回転数の除数は未確認のまま、舵角は生値のまま出す。
+// Decoded value of one known ID, using the byte positions written in config.h
+// and the manual (Rev.1.8, chapter 3-1).
+// config.h と手順書（Rev.1.8 の 3-1）のバイト位置で既知 ID をデコードする。
 static void canDumpDecode(const CanDumpEntry *e, char *out, size_t outLen)
 {
     const uint8_t *d = e->data;
@@ -825,7 +824,7 @@ static void canDumpDecode(const CanDumpEntry *e, char *out, size_t outLen)
         if (e->dlc >= 8)
         {
             unsigned raw = ((unsigned)d[2] << 8) | d[3];
-            snprintf(out, outLen, "rpm raw %u -> %u rpm (/%d, unconfirmed), pedal %u/255 = %u %%", raw,
+            snprintf(out, outLen, "rpm raw %u -> %u rpm (raw/%d), pedal %u/255 = %u %%", raw,
                      raw / SHIFT_RPM_DIVISOR, SHIFT_RPM_DIVISOR, d[7], (d[7] * 100u) / 255u);
             return;
         }
@@ -834,7 +833,9 @@ static void canDumpDecode(const CanDumpEntry *e, char *out, size_t outLen)
         if (e->dlc >= 6)
         {
             unsigned raw20 = (((unsigned)d[3] << 16) | ((unsigned)d[4] << 8) | d[5]) >> 4;
-            snprintf(out, outLen, "steering raw20 %u (0x%05X, x0.1 deg)", raw20, raw20);
+            int off = (int)raw20 - 7400; // centre about 7400, 0.1 deg per count, left + (manual Rev.1.8)
+            snprintf(out, outLen, "steering raw20 %u (0x%05X), about %s%d.%d deg (centre 7400, left +)", raw20, raw20,
+                     off < 0 ? "-" : "", abs(off) / 10, abs(off) % 10);
             return;
         }
         break;

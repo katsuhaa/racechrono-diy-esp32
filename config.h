@@ -220,14 +220,16 @@ uint8_t getUpdateRateHz(uint32_t can_id)
 #define SHIFT_STARTUP_ABORT_RPM SHIFT_RPM_BAR_FIRST
 
 // RPM source. Same frame as the RaceChrono RPM channel: ID 0x0618A001, bytes 2-3
-// big endian. The divisor below is NOT yet confirmed against the car - at idle
-// (about 850 rpm) the bar must stay dark; if it lights several LEDs the divisor
-// is wrong. LOG_LEVEL_DEBUG prints the raw value and the derived rpm every 10 s.
-// 回転数の取得元。ID 0x0618A001 の b2-b3（ビッグエンディアン）。
-// 下の除数は実車未確認。アイドリング（約 850rpm）でバーが消灯していれば正しい。
-// 何個か点灯するなら除数が違う。DEBUG では 10 秒ごとに生値と換算値を出す。
+// big endian = rpm as is (divisor 1). Confirmed by the in-car log of 2026-09-07
+// (manual Rev.1.8, 3-1: idle 790, blip 1491, engine off 0) and by the RaceChrono
+// equation bytesToUint(raw, 2, 2). The earlier guess of 4 kept the bar dark in
+// the car (2026-09-30). LOG_LEVEL_DEBUG prints raw and rpm every 10 s.
+// 回転数の取得元。ID 0x0618A001 の b2-b3（ビッグエンディアン）がそのまま rpm（除数 1）。
+// 2026-09-07 の実車ログ（手順書 Rev.1.8 の 3-1: アイドル 790、空吹かし 1491、停止で 0）と
+// RaceChrono の式 bytesToUint(raw, 2, 2) で確定。以前の仮置き 4 では実車でバーが
+// 点かなかった（2026-09-30）。DEBUG では 10 秒ごとに生値と rpm を出す。
 #define SHIFT_RPM_CAN_ID 0x0618A001
-#define SHIFT_RPM_DIVISOR 4
+#define SHIFT_RPM_DIVISOR 1
 
 // Blank the bar if no RPM frame arrives for this long (engine off / bus quiet).
 // この時間 RPM フレームが来なければバーを消す（エンジン停止・バス停止）。
