@@ -193,6 +193,24 @@ uint8_t getUpdateRateHz(uint32_t can_id)
 #define SHIFT_FLASH_PERIOD_MS 100 // 10 Hz flash / 点滅 10 Hz
 #define SHIFT_FRAME_MS 20         // LED refresh period / LED 更新周期
 
+// Look-ahead (2026-10-03). While the rpm is RISING the bar shows the rpm
+// expected SHIFT_LEAD_MS from now: current value + measured rise rate x lead
+// time, so a step lights up early enough to act on. The rise rate comes from
+// the RPM frames of the last SHIFT_LEAD_WINDOW_MS. The amount added is capped
+// at SHIFT_LEAD_MAX_RPM, so one bad frame cannot throw the bar to the top.
+// Falling or steady rpm is shown as it is. Every rule (length, colour, flash,
+// red) works on the shown value. 0 = off: the bar follows the bus exactly.
+// The DEBUG line prints bus rpm, rise rate and the amount added.
+// 先読み（2026-10-03）。回転が上昇中は SHIFT_LEAD_MS 先の予想回転数（現在値 + 上昇率 ×
+// 先読み時間）をバーに出し、各段が操作に間に合うタイミングで点く。上昇率は直近
+// SHIFT_LEAD_WINDOW_MS の RPM フレームから求める。足す量は SHIFT_LEAD_MAX_RPM で
+// 頭打ち（1 フレームの化けで満点にならない）。下降中・一定のときは実値のまま。
+// 長さ・色・点滅・赤の判定は全て表示値で行う。0 で無効（バスの値をそのまま表示）。
+// DEBUG 行にバスの回転数・上昇率・足した量が出る。
+#define SHIFT_LEAD_MS 150
+#define SHIFT_LEAD_WINDOW_MS 100
+#define SHIFT_LEAD_MAX_RPM 600
+
 // Power-on illumination, played once by the LED task right after boot:
 //   rainbow (whole hue circle scrolling along the strip)
 //   -> white flash that fades out
