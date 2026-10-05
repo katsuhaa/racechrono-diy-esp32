@@ -106,11 +106,6 @@ static volatile uint32_t shiftRpmRaw = 0;
 // 32 ビットで持つ。64 ビットはこの CPU では不可分に書けず、読み側が更新途中の値を
 // 拾い得る。下位 32 ビットが約 71 分で一周しても、符号なしの引き算なら差は正しい。
 static volatile uint32_t shiftRpmLastTime = 0;
-// Rise rate of the rpm in rpm per second, measured by taskGetTwaiMessages over
-// the last SHIFT_LEAD_WINDOW_MS of RPM frames. Negative while falling.
-// 回転数の変化率（rpm/秒）。taskGetTwaiMessages が直近 SHIFT_LEAD_WINDOW_MS の
-// RPM フレームから求める。下降中は負。
-static volatile int32_t shiftRpmSlope = 0;
 
 static inline uint8_t shiftScale8(uint8_t v, uint16_t scale255)
 {
@@ -372,92 +367,6 @@ static uint32_t shiftLiveRpm()
     if (((uint32_t)esp_timer_get_time() - shiftRpmLastTime) > SHIFT_RPM_TIMEOUT_US)
     {
         rpm = 0;
-    }
-    return rpm;
-}
-
-// ---- look-ahead / 先読み ----
-
-#define SHIFT_LEAD_SAMPLES 16 // RPM frames kept for the rise rate / 変化率に使う RPM フレーム数
-
-// Private to taskGetTwaiMessages; only shiftRpmSlope leaves this task.
-// taskGetTwaiMessages 専用。外に出るのは shiftRpmSlope だけ。
-static uint32_t shiftLeadT[SHIFT_LEAD_SAMPLES];
-static uint32_t shiftLeadRpm[SHIFT_LEAD_SAMPLES];
-static int shiftLeadHead = 0;
-static int shiftLeadCount = 0;
-
-// Called by taskGetTwaiMessages for every RPM frame. The rate is taken between
-// this frame and the OLDEST frame still inside the window (not the previous
-// frame), so frame-to-frame jitter is averaged out. Fewer than half a window
-// of history gives 0.
-// RPM フレームごとに taskGetTwaiMessages から呼ぶ。変化率は直前のフレームではなく、
-// 窓の中で最も古いフレームとの差から求める（フレーム間のばらつきを均す）。
-// 履歴が窓の半分に満たなければ 0。
-static void shiftLeadRecord(uint32_t rpm, uint32_t nowUs)
-{
-    shiftLeadT[shiftLeadHead] = nowUs;
-    shiftLeadRpm[shiftLeadHead] = rpm;
-    int newest = shiftLeadHead;
-    shiftLeadHead = (shiftLeadHead + 1) % SHIFT_LEAD_SAMPLES;
-    if (shiftLeadCount < SHIFT_LEAD_SAMPLES)
-    {
-        shiftLeadCount++;
-    }
-
-    int oldest = -1;
-    uint32_t oldestDt = 0;
-    for (int k = 1; k < shiftLeadCount; k++)
-    {
-        int idx = (newest - k + SHIFT_LEAD_SAMPLES) % SHIFT_LEAD_SAMPLES;
-        uint32_t dt = nowUs - shiftLeadT[idx];
-        if (dt > (uint32_t)SHIFT_LEAD_WINDOW_MS * 1000u)
-        {
-            break;
-        }
-        oldest = idx;
-        oldestDt = dt;
-    }
-
-    int32_t slope = 0;
-    if (oldest >= 0 && oldestDt >= (uint32_t)SHIFT_LEAD_WINDOW_MS * 500u)
-    {
-        int64_t diff = (int64_t)rpm - (int64_t)shiftLeadRpm[oldest];
-        slope = (int32_t)((diff * 1000000LL) / (int64_t)oldestDt);
-    }
-    shiftRpmSlope = slope;
-}
-
-// Rpm shown on the bar: the live value plus, while rising, the rise expected
-// over SHIFT_LEAD_MS counted from NOW (so the age of the last frame is covered
-// too). 0 once the bus has gone quiet. *leadOut receives the amount added.
-// バーに出す回転数。実値に、上昇中は「今」から SHIFT_LEAD_MS 先までの上昇分を足す
-//（最後のフレームからの経過分も含む）。バスが止まれば 0。*leadOut に足した量を返す。
-static uint32_t shiftDisplayRpm(uint32_t *leadOut)
-{
-    uint32_t rpm = shiftRpm;
-    uint32_t age = (uint32_t)esp_timer_get_time() - shiftRpmLastTime;
-    uint32_t lead = 0;
-    if (age > SHIFT_RPM_TIMEOUT_US)
-    {
-        rpm = 0;
-    }
-#if SHIFT_LEAD_MS > 0
-    else
-    {
-        int32_t slope = shiftRpmSlope;
-        if (slope > 0)
-        {
-            uint64_t aheadUs = (uint64_t)age + (uint64_t)SHIFT_LEAD_MS * 1000ULL;
-            uint64_t add = ((uint64_t)slope * aheadUs) / 1000000ULL;
-            lead = add > SHIFT_LEAD_MAX_RPM ? SHIFT_LEAD_MAX_RPM : (uint32_t)add;
-            rpm += lead;
-        }
-    }
-#endif
-    if (leadOut != NULL)
-    {
-        *leadOut = lead;
     }
     return rpm;
 }
@@ -729,8 +638,7 @@ void taskUpdateShiftLed(void *)
 
     for (;;)
     {
-        uint32_t lead = 0;
-        uint32_t rpm = shiftDisplayRpm(&lead);
+        uint32_t rpm = shiftLiveRpm();
 
         shiftRender(rpm);
         shiftShow();
@@ -744,9 +652,8 @@ void taskUpdateShiftLed(void *)
             {
                 int lit = shiftUseMirror ? shiftMirrorLitPairs(rpm) : shiftLitCount(rpm);
                 int litMax = shiftUseMirror ? SHIFT_MIRROR_PAIRS : SHIFT_BAR_LEDS;
-                LOG_DEBUG("task_shift_led", "raw " << shiftRpmRaw << " -> bus " << (rpm - lead) << " rpm, rate "
-                                                   << shiftRpmSlope << " rpm/s, lead +" << lead << " -> shown " << rpm
-                                                   << " rpm, pattern " << (int)shiftPattern << ", " << lit << "/" << litMax
+                LOG_DEBUG("task_shift_led", "raw " << shiftRpmRaw << " -> " << rpm << " rpm, pattern "
+                                                   << (int)shiftPattern << ", " << lit << "/" << litMax
                                                    << (shiftUseMirror ? " pairs" : " LEDs") << " lit ("
                                                    << (lit > 0 ? shiftBarColorName(rpm) : "dark") << "), frames "
                                                    << shiftFramesSent << " sent / " << shiftFramesFailed << " failed.");
@@ -1328,11 +1235,8 @@ void taskGetTwaiMessages(void *)
             if (!(message.rtr) && message.identifier == SHIFT_RPM_CAN_ID && message.data_length_code >= 4)
             {
                 shiftRpmRaw = ((uint32_t)message.data[2] << 8) | (uint32_t)message.data[3];
-                uint32_t rpmNow = shiftRpmRaw / SHIFT_RPM_DIVISOR;
-                uint32_t tNow = (uint32_t)esp_timer_get_time();
-                shiftLeadRecord(rpmNow, tNow); // rate first, so a reader never sees new rpm with the old rate
-                shiftRpm = rpmNow;             // 変化率を先に。新しい回転数と古い変化率の組を読ませない
-                shiftRpmLastTime = tNow;
+                shiftRpm = shiftRpmRaw / SHIFT_RPM_DIVISOR;
+                shiftRpmLastTime = (uint32_t)esp_timer_get_time();
             }
 
             bool forwardedNow = false;
