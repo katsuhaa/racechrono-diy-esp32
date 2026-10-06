@@ -156,6 +156,22 @@ uint8_t getUpdateRateHz(uint32_t can_id)
 #define SHIFT_BUTTON_DEBOUNCE_MS 40
 #define SHIFT_INDICATE_MS 600 // white / red confirmation shown this long / 白・赤の確認表示の長さ
 
+// After the button has changed the pattern and it is saved, restart the board
+// once so the power-on illumination plays again and its rpm sweep shows the
+// new pattern (2026-10-07). The restart waits for the button to be released
+// (a button still down at boot would be read as another press). No restart if
+// the NVS write failed (red) or the button is held longer than
+// SHIFT_PATTERN_RESET_WAIT_MS. BLE (RaceChrono) drops once during the restart.
+// 0 = no restart: back to the live display right after the white LEDs.
+// ボタンでパターンを変えて保存できたら一度再起動し、起動イルミを再生して、その
+// 回転数スイープで新しいパターンの見え方を確認できるようにする（2026-10-07）。
+// 再起動はボタンを離してから（押したまま起動すると、もう一度押されたと判定される）。
+// NVS 書き込み失敗（赤）と、SHIFT_PATTERN_RESET_WAIT_MS より長く押し続けた場合は
+// 再起動しない。再起動の間 BLE（RaceChrono）は一度切れる。
+// 0 = 再起動しない。白表示の後そのまま通常表示に戻る。
+#define SHIFT_PATTERN_RESET 1
+#define SHIFT_PATTERN_RESET_WAIT_MS 5000
+
 // Bar scale. The bar is FULLY LIT at SHIFT_RPM_BAR_FULL (the shift point) in
 // every pattern, uniform steps. Change *_FULL and the steps follow.
 //   bar    : LED#2 1400 ... LED#24 5800, 200 rpm per LED

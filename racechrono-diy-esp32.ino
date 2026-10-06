@@ -423,13 +423,13 @@ static void shiftLoadPattern()
                                        << (had ? "restored from NVS." : "- NVS empty, SHIFT_PATTERN_DEFAULT used."));
 }
 
-static void shiftSavePattern()
+static bool shiftSavePattern()
 {
     if (!shiftNvsOk)
     {
         LOG_ERROR("shift_led", "NVS not open, pattern not saved.");
         shiftIndicatePattern(false);
-        return;
+        return false;
     }
 
     size_t n = shiftPrefs.putUChar("pattern", shiftPattern);
@@ -444,14 +444,52 @@ static void shiftSavePattern()
         LOG_ERROR("shift_led", "NVS write failed: wrote " << n << " byte(s), read back " << (int)rb << ".");
     }
     shiftIndicatePattern(ok);
+    return ok;
 }
+
+#if SHIFT_PATTERN_RESET
+// Restart once so the power-on illumination shows the new pattern. Waits for
+// the button to be released first, since a button still down at boot would
+// be read as another press. Gives up, without restarting, if it is held longer
+// than SHIFT_PATTERN_RESET_WAIT_MS. Runs in the LED task.
+// 新しいパターンを起動イルミで見せるため一度再起動する。先にボタンが離されるのを
+// 待つ（押したまま起動すると、もう一度押されたと判定される）。
+// SHIFT_PATTERN_RESET_WAIT_MS より長く押されていたら再起動しない。LED タスク内で実行。
+static void shiftRestartAfterRelease()
+{
+    uint32_t t0 = millis();
+    while (digitalRead(SHIFT_BUTTON_PIN) == (SHIFT_BUTTON_ACTIVE_LOW ? LOW : HIGH))
+    {
+        if ((millis() - t0) >= SHIFT_PATTERN_RESET_WAIT_MS)
+        {
+            LOG_WARNING("shift_led", "Button still held after " << SHIFT_PATTERN_RESET_WAIT_MS << " ms, restart skipped.");
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    vTaskDelay(pdMS_TO_TICKS(SHIFT_BUTTON_DEBOUNCE_MS)); // let the contact settle / 接点が落ち着くまで
+
+    LOG_NOTICE("shift_led", "Restarting to show pattern " << (int)shiftPattern << ".");
+    Serial.flush();
+    shiftPrefs.end(); // putUChar() has already committed / putUChar() でコミット済み
+    ESP.restart();
+}
+#endif
 
 static void shiftNextPattern()
 {
     shiftPattern = (uint8_t)((shiftPattern + 1) % SHIFT_PATTERN_COUNT);
     shiftApplyPattern();
     LOG_NOTICE("shift_led", "Button: pattern -> " << (int)shiftPattern << " (" << shiftPatternName(shiftPattern) << ").");
-    shiftSavePattern();
+    bool saved = shiftSavePattern();
+#if SHIFT_PATTERN_RESET
+    if (saved)
+    {
+        shiftRestartAfterRelease();
+    }
+#else
+    (void)saved;
+#endif
 }
 
 static void shiftPollButton()
@@ -684,6 +722,9 @@ void startShiftIndicator()
     }
 
     pinMode(SHIFT_BUTTON_PIN, SHIFT_BUTTON_ACTIVE_LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
+    // Start from the real button state, so a button already down at boot is not a press.
+    // 起動時の実際の状態から始める。起動時に押されていても押下と数えない。
+    shiftBtnPrev = (digitalRead(SHIFT_BUTTON_PIN) == (SHIFT_BUTTON_ACTIVE_LOW ? LOW : HIGH));
     shiftLoadPattern();
 
     if (rmtInit(SHIFT_LED_PIN, RMT_TX_MODE, RMT_MEM_NUM_BLOCKS_1, 10000000)) // 100 ns tick
