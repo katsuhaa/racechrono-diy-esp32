@@ -96,6 +96,15 @@ static bool shiftUseMirror = false; // pattern 2
 static bool shiftBtnPrev = false;
 static uint32_t shiftBtnLastMs = 0;
 
+// Set just before the restart that follows a pattern change, so the next boot
+// plays the slow sweep. RTC no-init memory survives esp_restart() but holds
+// garbage after a power cycle, hence the magic value and the reset reason.
+// パターン変更後の再起動の直前に立て、次の起動でゆっくりのスイープを再生させる。RTC の
+// no-init 領域は esp_restart() では残るが電源投入後は不定値なので、magic 値と再起動理由で判定する。
+#define SHIFT_RESTART_MAGIC 0x5A1F7E57u
+RTC_NOINIT_ATTR static uint32_t shiftRestartFlag;
+static bool shiftSlowSweep = false; // this boot follows a pattern change / この起動はパターン変更の後
+
 // Written by taskGetTwaiMessages, read by taskUpdateShiftLed.
 // taskGetTwaiMessages が書き、taskUpdateShiftLed が読む。
 static volatile uint32_t shiftRpm = 0;
@@ -239,48 +248,70 @@ static int shiftMirrorLitPairs(uint32_t rpm)
     return n;
 }
 
-// ONE colour for the whole lit bar, decided by the CURRENT rpm.
-// 点灯中のバー全体の色。現在の回転数で決まる。
+// Colour change points, low to high: from each point up the bar takes the
+// next colour (blue, green, yellow, red); below the first one it is dim gray.
+// 色の切り替わり点（低回転から順）。各点から上は次の色（青・緑・黄・赤）、最初の点より下はグレー。
+#define SHIFT_COLOR_POINTS 4
+static const uint32_t shiftColorPointRpm[SHIFT_COLOR_POINTS] = {SHIFT_RPM_GRAY_MAX, SHIFT_RPM_BLUE_MAX,
+                                                                 SHIFT_RPM_YELLOW, SHIFT_RPM_RED};
+
+#if SHIFT_COLOR_BLEND_RPM > 0
+// a + (b - a) * part / whole, per channel / チャンネルごとの線形補間
+static ShiftRgb shiftMix(ShiftRgb a, ShiftRgb b, uint32_t part, uint32_t whole)
+{
+    ShiftRgb o;
+    o.r = (uint8_t)(((uint32_t)a.r * (whole - part) + (uint32_t)b.r * part) / whole);
+    o.g = (uint8_t)(((uint32_t)a.g * (whole - part) + (uint32_t)b.g * part) / whole);
+    o.b = (uint8_t)(((uint32_t)a.b * (whole - part) + (uint32_t)b.b * part) / whole);
+    return o;
+}
+#endif
+
+// ONE colour for the whole lit bar, decided by the CURRENT rpm. In the
+// SHIFT_COLOR_BLEND_RPM just below a change point the colour fades from the
+// previous one into the next, reaching it exactly at the point.
+// 点灯中のバー全体の色。現在の回転数で決まる。切り替わり点の手前 SHIFT_COLOR_BLEND_RPM の
+// 間は前の色から次の色へ徐々に変わり、切り替わり点でちょうど次の色になる。
 static ShiftRgb shiftBarColor(uint32_t rpm)
 {
-    if (rpm >= SHIFT_RPM_RED)
+    const ShiftRgb next[SHIFT_COLOR_POINTS] = {SHIFT_C_BLUE, SHIFT_C_GREEN, SHIFT_C_YELLOW, SHIFT_C_RED};
+
+    ShiftRgb c = shiftPct(SHIFT_C_GRAY, SHIFT_GRAY_LEVEL_PCT);
+    for (int k = 0; k < SHIFT_COLOR_POINTS; k++)
     {
-        return SHIFT_C_RED;
+        if (rpm >= shiftColorPointRpm[k])
+        {
+            c = next[k];
+            continue;
+        }
+#if SHIFT_COLOR_BLEND_RPM > 0
+        if (rpm + SHIFT_COLOR_BLEND_RPM > shiftColorPointRpm[k]) // just below this point / この点の手前
+        {
+            c = shiftMix(c, next[k], rpm + SHIFT_COLOR_BLEND_RPM - shiftColorPointRpm[k], SHIFT_COLOR_BLEND_RPM);
+        }
+#endif
+        break;
     }
-    if (rpm >= SHIFT_RPM_YELLOW)
-    {
-        return SHIFT_C_YELLOW;
-    }
-    if (rpm >= SHIFT_RPM_BLUE_MAX)
-    {
-        return SHIFT_C_GREEN;
-    }
-    if (rpm >= SHIFT_RPM_GRAY_MAX)
-    {
-        return SHIFT_C_BLUE;
-    }
-    return shiftPct(SHIFT_C_GRAY, SHIFT_GRAY_LEVEL_PCT);
+    return c;
 }
 
 static const char *shiftBarColorName(uint32_t rpm)
 {
-    if (rpm >= SHIFT_RPM_RED)
+    static const char *const name[SHIFT_COLOR_POINTS + 1] = {"gray", "blue", "green", "yellow", "red"};
+
+    int k = 0;
+    while (k < SHIFT_COLOR_POINTS && rpm >= shiftColorPointRpm[k])
     {
-        return "red";
+        k++;
     }
-    if (rpm >= SHIFT_RPM_YELLOW)
+#if SHIFT_COLOR_BLEND_RPM > 0
+    static const char *const fade[SHIFT_COLOR_POINTS] = {"gray>blue", "blue>green", "green>yellow", "yellow>red"};
+    if (k < SHIFT_COLOR_POINTS && rpm + SHIFT_COLOR_BLEND_RPM > shiftColorPointRpm[k])
     {
-        return "yellow";
+        return fade[k];
     }
-    if (rpm >= SHIFT_RPM_BLUE_MAX)
-    {
-        return "green";
-    }
-    if (rpm >= SHIFT_RPM_GRAY_MAX)
-    {
-        return "blue";
-    }
-    return "gray";
+#endif
+    return name[k];
 }
 
 static const char *shiftPatternName(uint8_t p)
@@ -383,18 +414,19 @@ static void shiftApplyPattern()
     shiftUseMirror = (shiftPattern == 2);
 }
 
-// On-device proof: white LEDs = pattern index + 1, RED = storage problem.
+// NVS trouble only: 3 red LEDs at the start of the strip for SHIFT_INDICATE_MS.
+// Nothing is shown when NVS works - the pattern itself is visible (2026-10-07).
 // Drawn on the physical strip so it does not mirror with the pattern.
 // Runs inside the LED task (it sleeps).
-// 実機での証明: 白 LED の数 = パターン番号 + 1、赤なら保存に問題。
-// 物理位置に描くのでパターンで反転しない。LED タスク内で実行する（待ちが入る）。
-static void shiftIndicatePattern(bool storeOk)
+// NVS 異常のときだけ、テープ先頭の 3 個を赤で SHIFT_INDICATE_MS 表示する。正常時は何も
+// 出さない（パターンそのものが見えるため、2026-10-07）。物理位置に描くので反転しない。
+// LED タスク内で実行する（待ちが入る）。
+static void shiftIndicateNvsError()
 {
-    ShiftRgb c = storeOk ? SHIFT_C_WHITE : SHIFT_C_RED;
     shiftClear();
-    for (int i = 0; i <= shiftPattern; i++)
+    for (int i = 0; i < 3; i++)
     {
-        shiftPutPixel(i, c);
+        shiftPutPixel(i, SHIFT_C_RED);
     }
     shiftShow();
     vTaskDelay(pdMS_TO_TICKS(SHIFT_INDICATE_MS));
@@ -428,7 +460,7 @@ static bool shiftSavePattern()
     if (!shiftNvsOk)
     {
         LOG_ERROR("shift_led", "NVS not open, pattern not saved.");
-        shiftIndicatePattern(false);
+        shiftIndicateNvsError();
         return false;
     }
 
@@ -442,8 +474,8 @@ static bool shiftSavePattern()
     else
     {
         LOG_ERROR("shift_led", "NVS write failed: wrote " << n << " byte(s), read back " << (int)rb << ".");
+        shiftIndicateNvsError();
     }
-    shiftIndicatePattern(ok);
     return ok;
 }
 
@@ -469,9 +501,10 @@ static void shiftRestartAfterRelease()
     }
     vTaskDelay(pdMS_TO_TICKS(SHIFT_BUTTON_DEBOUNCE_MS)); // let the contact settle / 接点が落ち着くまで
 
-    LOG_NOTICE("shift_led", "Restarting to show pattern " << (int)shiftPattern << ".");
+    LOG_NOTICE("shift_led", "Restarting to show pattern " << (int)shiftPattern << " with the slow sweep.");
     Serial.flush();
     shiftPrefs.end(); // putUChar() has already committed / putUChar() でコミット済み
+    shiftRestartFlag = SHIFT_RESTART_MAGIC;
     ESP.restart();
 }
 #endif
@@ -609,11 +642,13 @@ static void shiftShowFlashFade(uint32_t t, uint32_t total)
     }
 }
 
-// 3. Gauge sweep: the real display, 0 -> SHIFT_STARTUP_SWEEP_TOP_RPM, hold, back to 0.
-// 3. 回転数スイープ: 本番の表示を 0 → SHIFT_STARTUP_SWEEP_TOP_RPM → 保持 → 0。
+// 3. Gauge sweep: the real display, shiftSweepFrom -> SHIFT_STARTUP_SWEEP_TOP_RPM, hold, back to 0.
+// 3. 回転数スイープ: 本番の表示を shiftSweepFrom → SHIFT_STARTUP_SWEEP_TOP_RPM → 保持 → 0。
+static uint32_t shiftSweepFrom = 0; // 0 at power-on, the first bar LED after a pattern change
+
 static void shiftShowSweepUp(uint32_t t, uint32_t total)
 {
-    shiftRender((uint32_t)(((uint64_t)SHIFT_STARTUP_SWEEP_TOP_RPM * t) / total));
+    shiftRender(shiftSweepFrom + (uint32_t)(((uint64_t)(SHIFT_STARTUP_SWEEP_TOP_RPM - shiftSweepFrom) * t) / total));
 }
 
 static void shiftShowSweepHold(uint32_t t, uint32_t total)
@@ -632,12 +667,18 @@ static void shiftShowSweepDown(uint32_t t, uint32_t total)
 // ショー全体。実回転数で打ち切られたら false。
 static bool shiftStartupShow()
 {
-    LOG_NOTICE("shift_led", "Power-on illumination.");
-    bool done = shiftRunPhase(SHIFT_STARTUP_RAINBOW_MS, shiftShowRainbow) &&
-                shiftRunPhase(SHIFT_STARTUP_FLASH_MS, shiftShowFlashFade) &&
-                shiftRunPhase(SHIFT_STARTUP_SWEEP_UP_MS, shiftShowSweepUp) &&
-                shiftRunPhase(SHIFT_STARTUP_SWEEP_HOLD_MS, shiftShowSweepHold) &&
-                shiftRunPhase(SHIFT_STARTUP_SWEEP_DOWN_MS, shiftShowSweepDown);
+    // After a pattern change: no rainbow, no flash, the slow sweep starts at
+    // the first bar LED so the new pattern shows at once.
+    // パターン変更の後: レインボーと白フラッシュを省き、ゆっくりのスイープを最初の
+    // バー LED から始めて、新しいパターンをすぐ見せる。
+    const bool slow = shiftSlowSweep;
+    shiftSweepFrom = slow ? SHIFT_PATTERN_SWEEP_FROM_RPM : 0;
+    LOG_NOTICE("shift_led", (slow ? "Slow sweep only (pattern changed)." : "Power-on illumination."));
+    bool done = (slow || shiftRunPhase(SHIFT_STARTUP_RAINBOW_MS, shiftShowRainbow)) &&
+                (slow || shiftRunPhase(SHIFT_STARTUP_FLASH_MS, shiftShowFlashFade)) &&
+                shiftRunPhase(slow ? SHIFT_PATTERN_SWEEP_UP_MS : SHIFT_STARTUP_SWEEP_UP_MS, shiftShowSweepUp) &&
+                shiftRunPhase(slow ? SHIFT_PATTERN_SWEEP_HOLD_MS : SHIFT_STARTUP_SWEEP_HOLD_MS, shiftShowSweepHold) &&
+                shiftRunPhase(slow ? SHIFT_PATTERN_SWEEP_DOWN_MS : SHIFT_STARTUP_SWEEP_DOWN_MS, shiftShowSweepDown);
     if (done)
     {
         LOG_NOTICE("shift_led", "Illumination finished, " << shiftFramesSent << " frames sent, "
@@ -662,13 +703,13 @@ void taskUpdateShiftLed(void *)
 #if SHIFT_STARTUP_SHOW
     showDone = shiftStartupShow();
 #endif
-    if (showDone)
+    if (showDone && !shiftNvsOk)
     {
-        // Boot proof of the restored pattern: white LEDs = pattern + 1, red = NVS trouble.
+        // NVS could not be opened, so the saved pattern was not restored: red.
         // Skipped when the show was cut short - the driver needs the bar right now.
-        // 復元したパターンの証明: 白 LED の数 = パターン + 1、赤なら NVS に問題。
+        // NVS が開けず保存パターンを復元できていない: 赤。
         // ショーを打ち切ったときは省く。今すぐバーが要る。
-        shiftIndicatePattern(shiftNvsOk);
+        shiftIndicateNvsError();
     }
 
     uint64_t reportTimerStart = esp_timer_get_time();
@@ -720,6 +761,11 @@ void startShiftIndicator()
     {
         shiftMirrorRpm[k] = SHIFT_RPM_MIRROR_FIRST + k * SHIFT_RPM_MIRROR_STEP;
     }
+
+    // A restart that followed a pattern change plays the slow sweep once.
+    // パターン変更による再起動なら、ゆっくりのスイープを 1 回再生する。
+    shiftSlowSweep = (esp_reset_reason() == ESP_RST_SW) && (shiftRestartFlag == SHIFT_RESTART_MAGIC);
+    shiftRestartFlag = 0;
 
     pinMode(SHIFT_BUTTON_PIN, SHIFT_BUTTON_ACTIVE_LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
     // Start from the real button state, so a button already down at boot is not a press.

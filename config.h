@@ -142,35 +142,54 @@ uint8_t getUpdateRateHz(uint32_t can_id)
 #define SHIFT_PATTERN_DEFAULT 2
 
 // Pattern button: BOOT on the Freenove board (GPIO 0, active low, internal
-// pull-up). Each press = next pattern, confirmed on the strip with white LEDs
-// (pattern + 1 of them; RED instead of white = the NVS write failed). The same
-// LEDs are shown at boot, so a correct restore is visible without a PC.
-// Never hold this button while resetting or powering on: GPIO 0 low at reset
-// enters the bootloader.
+// pull-up). Each press = next pattern, saved to NVS; the board then restarts
+// and the illumination shows the new pattern with a slow sweep (below).
+// No pattern number is shown (2026-10-07): the pattern itself is visible.
+// Red LEDs at the start of the strip = the NVS write (at boot: the NVS open)
+// failed. Never hold this button while resetting or powering on: GPIO 0 low
+// at reset enters the bootloader.
 // パターン切替ボタン: Freenove ボードの BOOT（GPIO 0、アクティブ Low、内部プルアップ）。
-// 押すたびに次のパターン。白 LED（パターン番号 + 1 個）で確認、白でなく赤なら
-// NVS 書き込み失敗。起動時にも同じ表示が出るので PC なしで復元を確認できる。
+// 押すたびに次のパターンにして NVS に保存し、再起動して起動イルミのゆっくりした
+// スイープで新しいパターンを見せる（下記）。パターン番号は表示しない（2026-10-07、
+// パターンそのものが見えるため）。テープ先頭の赤 LED = NVS の書き込み（起動時は読み出し）失敗。
 // リセット・電源投入中に押し続けないこと（GPIO 0 が Low だとブートローダに入る）。
 #define SHIFT_BUTTON_PIN 0
 #define SHIFT_BUTTON_ACTIVE_LOW 1
 #define SHIFT_BUTTON_DEBOUNCE_MS 40
-#define SHIFT_INDICATE_MS 600 // white / red confirmation shown this long / 白・赤の確認表示の長さ
+#define SHIFT_INDICATE_MS 600 // red NVS-error indication shown this long / NVS 異常の赤表示の長さ
 
 // After the button has changed the pattern and it is saved, restart the board
-// once so the power-on illumination plays again and its rpm sweep shows the
-// new pattern (2026-10-07). The restart waits for the button to be released
-// (a button still down at boot would be read as another press). No restart if
-// the NVS write failed (red) or the button is held longer than
-// SHIFT_PATTERN_RESET_WAIT_MS. BLE (RaceChrono) drops once during the restart.
-// 0 = no restart: back to the live display right after the white LEDs.
-// ボタンでパターンを変えて保存できたら一度再起動し、起動イルミを再生して、その
-// 回転数スイープで新しいパターンの見え方を確認できるようにする（2026-10-07）。
+// once so the illumination plays again, with its rpm sweep slowed down
+// (SHIFT_PATTERN_SWEEP_*) to show the new pattern (2026-10-07). The restart
+// waits for the button to be released (a button still down at boot would be
+// read as another press). No restart if the NVS write failed (red) or the
+// button is held longer than SHIFT_PATTERN_RESET_WAIT_MS. BLE (RaceChrono)
+// drops once during the restart. 0 = no restart: the new pattern just takes over.
+// ボタンでパターンを変えて保存できたら一度再起動して起動イルミを再生し、その回転数
+// スイープをゆっくり（SHIFT_PATTERN_SWEEP_*）流して新しいパターンを見せる（2026-10-07）。
 // 再起動はボタンを離してから（押したまま起動すると、もう一度押されたと判定される）。
 // NVS 書き込み失敗（赤）と、SHIFT_PATTERN_RESET_WAIT_MS より長く押し続けた場合は
 // 再起動しない。再起動の間 BLE（RaceChrono）は一度切れる。
-// 0 = 再起動しない。白表示の後そのまま通常表示に戻る。
+// 0 = 再起動しない（そのまま新しいパターンで表示）。
 #define SHIFT_PATTERN_RESET 1
 #define SHIFT_PATTERN_RESET_WAIT_MS 5000
+
+// What plays after a pattern-change restart: only a sweep, slower than at a
+// normal power-on so the new pattern can be watched. The rainbow and the white
+// flash are skipped and the sweep starts at the first bar LED, so the new
+// pattern shows right after the restart (2026-10-07). It goes from
+// SHIFT_PATTERN_SWEEP_FROM_RPM up to SHIFT_STARTUP_SWEEP_TOP_RPM in
+// SHIFT_PATTERN_SWEEP_UP_MS (4700 ms = about 0.19 s per bar LED), holds, and
+// comes back down to 0. A normal power-on keeps the full, fast illumination.
+// パターン変更の再起動後に再生するもの: スイープだけを、新しいパターンを見られるよう通常の
+// 電源投入より遅く流す。レインボーと白フラッシュは省き、スイープは最初のバー LED から始めるので、
+// 再起動直後に新しいパターンが出る（2026-10-07）。SHIFT_PATTERN_SWEEP_FROM_RPM から頂点
+// （SHIFT_STARTUP_SWEEP_TOP_RPM）まで SHIFT_PATTERN_SWEEP_UP_MS で上げ（4700 ms でバーの LED
+// 1 個あたり約 0.19 秒）、保持して 0 まで下げる。通常の電源投入は従来どおり全部を速く再生する。
+#define SHIFT_PATTERN_SWEEP_FROM_RPM SHIFT_RPM_BAR_FIRST // 1400: the first LED lights at once / 最初の LED がすぐ点く
+#define SHIFT_PATTERN_SWEEP_UP_MS 4700
+#define SHIFT_PATTERN_SWEEP_HOLD_MS 1000
+#define SHIFT_PATTERN_SWEEP_DOWN_MS 2000
 
 // Bar scale. The bar is FULLY LIT at SHIFT_RPM_BAR_FULL (the shift point) in
 // every pattern, uniform steps. Change *_FULL and the steps follow.
@@ -206,6 +225,23 @@ uint8_t getUpdateRateHz(uint32_t can_id)
 #define SHIFT_RPM_FLASH (SHIFT_RPM_BAR_FULL + SHIFT_RPM_BAR_STEP) // 6000
 #define SHIFT_RPM_RED 6200
 
+// Gradation at each colour change (2026-10-07). In the SHIFT_COLOR_BLEND_RPM
+// just below each change point (3000, 4000, 5400, 6200) the bar fades from the
+// previous colour into the next one and reaches it exactly at the point, so
+// the points themselves stay as above. The colour still depends on the rpm
+// only: the same rpm always gives the same colour. 400 = two bar LEDs
+// (widened from 200 on 2026-10-07). With 400 the yellow-to-red fade starts at
+// 5800, so the full bar already warms from yellow toward orange before it
+// starts flashing at 6000. 0 = change at once. Keep it below the smallest gap
+// between points (800).
+// 色の切り替わりのグラデーション（2026-10-07）。各切り替わり点（3000・4000・5400・6200）の
+// 手前 SHIFT_COLOR_BLEND_RPM の間で前の色から次の色へ徐々に変わり、切り替わり点で
+// ちょうど次の色になる（切り替わり点そのものは上のとおり）。色は回転数だけで決まり、
+// 同じ回転数なら常に同じ色。400 = バーの LED 2 個分（2026-10-07 に 200 から広げた）。
+// 400 だと黄→赤は 5800 から始まり、全点灯の時点で黄から橙へ寄り始め、6000 で点滅に入る。
+// 0 = 従来どおり一瞬で切り替え。切り替わり点どうしの最小間隔（800）より小さくすること。
+#define SHIFT_COLOR_BLEND_RPM 400
+
 #define SHIFT_FLASH_PERIOD_MS 100 // 10 Hz flash / 点滅 10 Hz
 #define SHIFT_FRAME_MS 20         // LED refresh period / LED 更新周期
 
@@ -214,18 +250,17 @@ uint8_t getUpdateRateHz(uint32_t can_id)
 //   -> white flash that fades out
 //   -> gauge sweep: the real display driven 0 -> SWEEP_TOP rpm and back, in
 //      the active pattern, so every LED, every colour and the flash are seen
-//   -> white pattern confirmation (see the button above)
+//      (slowly after a pattern change, see SHIFT_PATTERN_SWEEP_*)
 // If a live rpm at/above SHIFT_STARTUP_ABORT_RPM arrives while it plays (unit
 // reset while driving) the show stops at once and the normal display takes over.
-// 0 disables the show; only the pattern confirmation remains.
+// 0 disables the show.
 // 起動イルミネーション。LED タスクが起動直後に 1 回だけ再生する:
 //   レインボー（色相環をテープに並べて流す）
 //   → 白フラッシュしてフェードアウト
 //   → 回転数スイープ: 本番の表示を 0 → SWEEP_TOP rpm → 0 と動かす。現在のパターンで
-//      全 LED・全色・点滅が一通り見える
-//   → パターン確認の白表示（上のボタンの項）
+//      全 LED・全色・点滅が一通り見える（パターン変更の後はゆっくり、SHIFT_PATTERN_SWEEP_*）
 // 再生中に SHIFT_STARTUP_ABORT_RPM 以上の実回転数が来たら（走行中のリセット）
-// 直ちに中断して通常表示に移る。0 で無効（パターン確認だけ残る）。
+// 直ちに中断して通常表示に移る。0 で無効。
 #define SHIFT_STARTUP_SHOW 1
 #define SHIFT_STARTUP_RAINBOW_MS 1200
 #define SHIFT_STARTUP_FLASH_MS 400
