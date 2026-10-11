@@ -115,15 +115,35 @@ uint8_t getUpdateRateHz(uint32_t can_id)
 // テープへ送る色順。led_selftest.ino の COLOR_ORDER と同じ番号。
 #define SHIFT_COLOR_ORDER 0
 
-// 0..255. Applies to every colour, the power-on show included.
+// 0..255. Applies to every colour, the power-on show included, except the bar
+// from green up (SHIFT_GREEN_UP_BRIGHTNESS below).
 // 128 = daytime level (2026-09-27, raised from 64). Bench fed from the Freenove
 // "3.3V" pin: stay at or below 128, the all-white flash of the show is the
 // heaviest load. In the car (MP1584EN #1, LED only) anything up to 255 is fine.
-// 全色に掛かる（起動イルミも含む）。128 = 昼間用（2026-09-27、64 から引き上げ）。
+// 全色に掛かる（起動イルミも含む）。ただし緑以降のバーは下の SHIFT_GREEN_UP_BRIGHTNESS。
+// 128 = 昼間用（2026-09-27、64 から引き上げ）。
 // Freenove「3.3V」ピンから給電するベンチでは 128 以下にする（イルミの全灯白が最大負荷）。
 // 車載（MP1584EN #1、LED 専用）なら 255 まで問題ない。
 #define SHIFT_MASTER_BRIGHTNESS 128
 #define SHIFT_GRAY_LEVEL_PCT 25 // dim gray = this percent of master / グレーはマスターのこの割合
+
+// 0..255. Brightness of the lit bar from green up (2026-10-12): green, yellow,
+// the yellow-to-red fade and red, flashing included. Red flashing was easy to
+// notice while driving, the stages before it were not. Gray, blue, the orange
+// ends and the power-on rainbow and white flash keep SHIFT_MASTER_BRIGHTNESS.
+// In the blue-to-green fade (the SHIFT_COLOR_BLEND_RPM below 4000) the level
+// rises together with the colour, so there is no sudden jump. Set it equal to
+// SHIFT_MASTER_BRIGHTNESS to go back. It about doubles the LED current from
+// green up; on the bench fed from the Freenove "3.3V" pin use 128 here too
+// (the full yellow bar becomes the heaviest load).
+// 緑以降のバーの輝度（2026-10-12）。0〜255。緑・黄・黄→赤・赤（点滅を含む）。
+// 走行中、赤点滅は気づくがその手前が気づきにくいため最大にする。グレー・青・両端の
+// オレンジ・起動時のレインボーと白フラッシュは SHIFT_MASTER_BRIGHTNESS のまま。
+// 青→緑のグラデーション（4000 の手前 SHIFT_COLOR_BLEND_RPM）の間は色と一緒に輝度も
+// 上がるので、急に明るくならない。SHIFT_MASTER_BRIGHTNESS と同じ値にすれば元に戻る。
+// 緑以降の LED 電流はおよそ 2 倍になる。Freenove「3.3V」ピン給電のベンチではここも
+// 128 にする（黄の全点灯が最大負荷になる）。
+#define SHIFT_GREEN_UP_BRIGHTNESS 255
 
 // Display patterns. Cycled by the button, kept in NVS (namespace "shiftled",
 // key "pattern") and restored at boot.
@@ -214,15 +234,22 @@ uint8_t getUpdateRateHz(uint32_t can_id)
 //   below GRAY_MAX : dim gray    below BLUE_MAX : blue    below YELLOW : green
 //   YELLOW and up  : yellow      RED and up     : red
 // From SHIFT_RPM_FLASH up everything flashes at 10 Hz, bar length kept.
-// FLASH is one step AFTER the bar is full, so "full and steady" exists.
+// FLASH = 5800 (2026-10-12): to shift at 6200, the flash leads it by what the
+// engine gains in 2nd gear during a 0.45 s reaction time (about 360-390 rpm,
+// calculated from the gearing, not measured). The bar is full at the same
+// rpm, so the full bar starts flashing; yellow from 5400 stays steady until
+// then. Before: one bar LED above the full bar (6000), then yellow (5400).
 // 点灯中のバー全体が、現在回転数で決まる 1 色になる（LED ごとの色ではない）。
 //   GRAY_MAX 未満: グレー  BLUE_MAX 未満: 青  YELLOW 未満: 緑  YELLOW 以上: 黄  RED 以上: 赤
 // SHIFT_RPM_FLASH 以上は全体が 10 Hz で点滅、バーの長さは維持。
-// FLASH は全点灯の 1 段上なので「全点灯・点灯したまま」の段が必ずある。
+// FLASH = 5800（2026-10-12）: 6200 でシフトするため、反応時間 0.45 秒の間に 2 速で上がる分
+// （約 360〜390 rpm、変速比などからの計算値で実測ではない）だけ手前から点滅させる。全点灯と同じ
+// 回転数なので、全点灯した時点で点滅が始まる。黄（5400〜）はそれまで点灯したまま。
+// 以前は全点灯の LED 1 個分上（6000）、その後 黄（5400）だった。
 #define SHIFT_RPM_GRAY_MAX 3000
 #define SHIFT_RPM_BLUE_MAX 4000
 #define SHIFT_RPM_YELLOW 5400
-#define SHIFT_RPM_FLASH (SHIFT_RPM_BAR_FULL + SHIFT_RPM_BAR_STEP) // 6000
+#define SHIFT_RPM_FLASH 5800
 #define SHIFT_RPM_RED 6200
 
 // Gradation at each colour change (2026-10-07). In the SHIFT_COLOR_BLEND_RPM
@@ -231,14 +258,13 @@ uint8_t getUpdateRateHz(uint32_t can_id)
 // the points themselves stay as above. The colour still depends on the rpm
 // only: the same rpm always gives the same colour. 400 = two bar LEDs
 // (widened from 200 on 2026-10-07). With 400 the yellow-to-red fade starts at
-// 5800, so the full bar already warms from yellow toward orange before it
-// starts flashing at 6000. 0 = change at once. Keep it below the smallest gap
-// between points (800).
+// 5800, so the full bar warms from yellow toward orange as soon as it is full.
+// 0 = change at once. Keep it below the smallest gap between points (800).
 // 色の切り替わりのグラデーション（2026-10-07）。各切り替わり点（3000・4000・5400・6200）の
 // 手前 SHIFT_COLOR_BLEND_RPM の間で前の色から次の色へ徐々に変わり、切り替わり点で
 // ちょうど次の色になる（切り替わり点そのものは上のとおり）。色は回転数だけで決まり、
 // 同じ回転数なら常に同じ色。400 = バーの LED 2 個分（2026-10-07 に 200 から広げた）。
-// 400 だと黄→赤は 5800 から始まり、全点灯の時点で黄から橙へ寄り始め、6000 で点滅に入る。
+// 400 だと黄→赤は 5800 から始まり、全点灯の時点で黄から橙へ寄り始める。
 // 0 = 従来どおり一瞬で切り替え。切り替わり点どうしの最小間隔（800）より小さくすること。
 #define SHIFT_COLOR_BLEND_RPM 400
 

@@ -55,13 +55,15 @@ RaceChronoPidMap<PidExtra> pidMap;
 //   cycled by the BOOT button and kept in NVS; the bar is full at
 //   SHIFT_RPM_BAR_FULL; the whole lit bar is ONE colour chosen by the current
 //   rpm; 10 Hz flash from SHIFT_RPM_FLASH with the bar length kept; all red from
-//   SHIFT_RPM_RED. Numbers live in config.h. A power-on illumination runs once.
+//   SHIFT_RPM_RED; from green up the bar is at SHIFT_GREEN_UP_BRIGHTNESS
+//   (2026-10-12). Numbers live in config.h. A power-on illumination runs once.
 // シフトインジケータ。外部ライブラリ不要、esp32 core の RMT HAL で駆動。
 // ビットタイミングと API は core 3.3.x の esp32-hal-rgb-led.c に準拠。
 // 表示規則（2026-09-17 確定、ベンチ用 led_selftest.ino と同じ）:
 //   3 パターン（テープ先頭から / 末尾から / 対称）を BOOT ボタンで巡回し NVS に保存。
 //   SHIFT_RPM_BAR_FULL で全点灯。点灯中のバー全体が現在回転数で決まる 1 色。
 //   SHIFT_RPM_FLASH 以上は長さを保ったまま 10 Hz 点滅、SHIFT_RPM_RED 以上は全部赤。
+//   緑以降のバーは SHIFT_GREEN_UP_BRIGHTNESS の輝度（2026-10-12）。
 //   数値は config.h。起動時にイルミネーションを 1 回再生する。
 // ---------------------------------------------------------------------------
 
@@ -131,19 +133,22 @@ static ShiftRgb shiftPct(ShiftRgb c, int percent)
 }
 
 // Physical position on the strip (0 = the DIN end). Every drawing call ends
-// up here; master brightness and byte order are applied here only.
+// up here; brightness and byte order are applied here only. level 0..255:
+// shiftPutPixel() uses SHIFT_MASTER_BRIGHTNESS, the bar from green up passes
+// SHIFT_GREEN_UP_BRIGHTNESS (2026-10-12).
 // テープ上の物理位置（0 = DIN 側）。描画は全てここを通る。
-// マスター輝度と色順はここでだけ掛ける。
-static void shiftPutPixel(int i, ShiftRgb c)
+// 輝度と色順はここでだけ掛ける。level 0〜255: shiftPutPixel() は
+// SHIFT_MASTER_BRIGHTNESS、緑以降のバーは SHIFT_GREEN_UP_BRIGHTNESS を渡す（2026-10-12）。
+static void shiftPutPixelLevel(int i, ShiftRgb c, uint8_t level)
 {
     if (i < 0 || i >= SHIFT_NUM_LEDS)
     {
         return;
     }
 
-    uint8_t r = shiftScale8(c.r, SHIFT_MASTER_BRIGHTNESS);
-    uint8_t g = shiftScale8(c.g, SHIFT_MASTER_BRIGHTNESS);
-    uint8_t b = shiftScale8(c.b, SHIFT_MASTER_BRIGHTNESS);
+    uint8_t r = shiftScale8(c.r, level);
+    uint8_t g = shiftScale8(c.g, level);
+    uint8_t b = shiftScale8(c.b, level);
 
 #if SHIFT_COLOR_ORDER == 1
     shiftPx[i][0] = r; shiftPx[i][1] = g; shiftPx[i][2] = b; // RGB
@@ -160,18 +165,28 @@ static void shiftPutPixel(int i, ShiftRgb c)
 #endif
 }
 
+static void shiftPutPixel(int i, ShiftRgb c)
+{
+    shiftPutPixelLevel(i, c, SHIFT_MASTER_BRIGHTNESS);
+}
+
 // Logical LED# (0 = LED#1, the low-rpm end) to the strip, honouring the
 // direction of the active pattern. Only this mapping knows which physical end
 // LED#1 is.
 // 論理位置（0 = LED#1、低回転側）から実際の LED へ。現在のパターンの向きを反映する。
 // LED#1 がどちらの端かを知っているのはこの変換だけ。
-static void shiftSetPixel(int i, ShiftRgb c)
+static void shiftSetPixelLevel(int i, ShiftRgb c, uint8_t level)
 {
     if (i < 0 || i >= SHIFT_NUM_LEDS)
     {
         return;
     }
-    shiftPutPixel(shiftFlipped ? (SHIFT_NUM_LEDS - 1 - i) : i, c);
+    shiftPutPixelLevel(shiftFlipped ? (SHIFT_NUM_LEDS - 1 - i) : i, c, level);
+}
+
+static void shiftSetPixel(int i, ShiftRgb c)
+{
+    shiftSetPixelLevel(i, c, SHIFT_MASTER_BRIGHTNESS);
 }
 
 static void shiftClear()
@@ -295,6 +310,30 @@ static ShiftRgb shiftBarColor(uint32_t rpm)
     return c;
 }
 
+// Brightness of the lit bar, by the current rpm (2026-10-12):
+// SHIFT_MASTER_BRIGHTNESS below green, SHIFT_GREEN_UP_BRIGHTNESS from green
+// (SHIFT_RPM_BLUE_MAX) up. In the blue-to-green fade it rises with the colour.
+// 点灯中のバーの輝度。現在の回転数で決まる（2026-10-12）。緑より下は
+// SHIFT_MASTER_BRIGHTNESS、緑（SHIFT_RPM_BLUE_MAX）から上は SHIFT_GREEN_UP_BRIGHTNESS。
+// 青→緑のグラデーションの間は色と一緒に上がる。
+static uint8_t shiftBarLevel(uint32_t rpm)
+{
+    if (rpm >= SHIFT_RPM_BLUE_MAX)
+    {
+        return SHIFT_GREEN_UP_BRIGHTNESS;
+    }
+#if SHIFT_COLOR_BLEND_RPM > 0
+    if (rpm + SHIFT_COLOR_BLEND_RPM > SHIFT_RPM_BLUE_MAX) // blue-to-green fade / 青→緑の間
+    {
+        uint32_t part = rpm + SHIFT_COLOR_BLEND_RPM - SHIFT_RPM_BLUE_MAX;
+        return (uint8_t)(((uint32_t)SHIFT_MASTER_BRIGHTNESS * (SHIFT_COLOR_BLEND_RPM - part) +
+                          (uint32_t)SHIFT_GREEN_UP_BRIGHTNESS * part) /
+                         SHIFT_COLOR_BLEND_RPM);
+    }
+#endif
+    return SHIFT_MASTER_BRIGHTNESS;
+}
+
 static const char *shiftBarColorName(uint32_t rpm)
 {
     static const char *const name[SHIFT_COLOR_POINTS + 1] = {"gray", "blue", "green", "yellow", "red"};
@@ -338,9 +377,10 @@ static void shiftRenderBar(uint32_t rpm)
 
     int n = shiftLitCount(rpm);
     ShiftRgb c = shiftBarColor(rpm);
+    uint8_t level = shiftBarLevel(rpm);
     for (int k = 0; k < n; k++)
     {
-        shiftSetPixel(k + 1, c);
+        shiftSetPixelLevel(k + 1, c, level);
     }
 
     if (n < SHIFT_BAR_LEDS)
@@ -362,10 +402,11 @@ static void shiftRenderMirror(uint32_t rpm)
     }
 
     ShiftRgb c = shiftBarColor(rpm);
+    uint8_t level = shiftBarLevel(rpm);
     for (int k = 0; k < n; k++)
     {
-        shiftSetPixel(k, c);                     // LED#1 .. LED#12
-        shiftSetPixel(SHIFT_NUM_LEDS - 1 - k, c); // LED#24 .. LED#13
+        shiftSetPixelLevel(k, c, level);                      // LED#1 .. LED#12
+        shiftSetPixelLevel(SHIFT_NUM_LEDS - 1 - k, c, level); // LED#24 .. LED#13
     }
 }
 
@@ -778,7 +819,9 @@ void startShiftIndicator()
         isShiftLedStarted = true;
         LOG_NOTICE("shift_led", "RMT started on GPIO " << SHIFT_LED_PIN << ", bar full at "
                                                        << shiftBarRpm[SHIFT_BAR_LEDS - 1] << " rpm, flash from "
-                                                       << SHIFT_RPM_FLASH << ", red from " << SHIFT_RPM_RED << ".");
+                                                       << SHIFT_RPM_FLASH << ", red from " << SHIFT_RPM_RED
+                                                       << ", brightness " << SHIFT_MASTER_BRIGHTNESS
+                                                       << ", from green " << SHIFT_GREEN_UP_BRIGHTNESS << ".");
         xTaskCreatePinnedToCore(taskUpdateShiftLed, "taskUpdateShiftLed", 8192, NULL, 1, NULL, xPortGetCoreID());
     }
     else
